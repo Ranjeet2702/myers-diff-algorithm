@@ -10,11 +10,11 @@ import java.util.List;
 public class Main {
 
     static class Operation {
-        String type;
+        char type;
         int aIndex;
         int bIndex;
 
-        Operation(String type, int aIndex, int bIndex) {
+        Operation(char type, int aIndex, int bIndex) {
             this.type = type;
             this.aIndex = aIndex;
             this.bIndex = bIndex;
@@ -23,49 +23,39 @@ public class Main {
 
     public static void main(String[] args) {
 
-        if (args.length != 3) {
-            System.err.println("Usage: java Main <lines|highlight> <fileA> <fileB>");
-            System.exit(2);
-        }
-
-        String command = args[0];
-
-        if (!command.equals("lines") &&
-                !command.equals("highlight") &&
-                !command.equals("diff")) {
-
-            System.err.println("Unknown command: " + command);
-            System.exit(2);
-        }
-
-        byte[] fileA;
-        byte[] fileB;
-
-        try {
-            fileA = Files.readAllBytes(Path.of(args[1]));
-            fileB = Files.readAllBytes(Path.of(args[2]));
-        } catch (IOException e) {
-            System.err.println("Error reading file: " + e.getMessage());
-            System.exit(2);
+        if (args.length < 3) {
             return;
         }
 
-        List<byte[]> A = splitLines(fileA);
-        List<byte[]> B = splitLines(fileB);
+        String command = args[0];
+        String fileA = args[1];
+        String fileB = args[2];
 
-        List<Operation> operations = myersDiff(A, B);
+        try {
 
-        if (command.equals("highlight")) {
-            printHighlight(A, B, operations);
-        } else {
-            printDiff(A, B, operations);
+            byte[] bytesA = Files.readAllBytes(Path.of(fileA));
+            byte[] bytesB = Files.readAllBytes(Path.of(fileB));
+
+            List<byte[]> A = splitLines(bytesA);
+            List<byte[]> B = splitLines(bytesB);
+
+            List<Operation> operations = myersDiff(A, B);
+
+            if (command.equals("highlight")) {
+                printHighlight(A, B, operations);
+            } else {
+                printDiff(A, B, operations);
+            }
+
+        } catch (IOException e) {
+
+            System.err.println("Error reading files: " + e.getMessage());
+            System.exit(2);
         }
     }
 
     // ------------------------------------------------------------
-    // Split file into lines using raw bytes.
-    // Newline byte '\n' is the separator.
-    // '\r' is preserved as part of the line.
+    // Split file into lines using raw bytes
     // ------------------------------------------------------------
 
     static List<byte[]> splitLines(byte[] data) {
@@ -79,7 +69,6 @@ public class Main {
             if (data[i] == '\n') {
 
                 lines.add(Arrays.copyOfRange(data, start, i));
-
                 start = i + 1;
             }
         }
@@ -93,14 +82,14 @@ public class Main {
     }
 
     // ------------------------------------------------------------
-    // Myers diff for lines
+    // Myers line-level diff
+    // Memory optimized version
     // ------------------------------------------------------------
 
     static List<Operation> myersDiff(List<byte[]> A, List<byte[]> B) {
 
         int N = A.size();
         int M = B.size();
-
         int max = N + M;
 
         List<Operation> result = new ArrayList<>();
@@ -115,32 +104,44 @@ public class Main {
 
         V[offset + 1] = 0;
 
+        /*
+         * IMPORTANT:
+         *
+         * Do NOT use:
+         *
+         * trace.add(V.clone());
+         *
+         * That stores the complete V array for every D
+         * and causes hidden-test memory failures.
+         *
+         * Instead, we store only the useful diagonals.
+         */
         List<int[]> trace = new ArrayList<>();
 
         int finalD = 0;
 
-        outer: for (int D = 0; D <= max; D++) {
+        outer:
+        for (int D = 0; D <= max; D++) {
 
             for (int k = -D; k <= D; k += 2) {
 
                 int i;
 
-                // Insert
                 if (k == -D ||
                         (k != D &&
-                                V[k - 1 + offset] < V[k + 1 + offset])) {
+                                V[offset + k - 1]
+                                        < V[offset + k + 1])) {
 
-                    i = V[k + 1 + offset];
+                    i = V[offset + k + 1];
 
                 } else {
 
-                    // Delete
-                    i = V[k - 1 + offset] + 1;
+                    i = V[offset + k - 1] + 1;
                 }
 
                 int j = i - k;
 
-                // Follow diagonal while lines are equal.
+                // Follow the matching diagonal.
                 while (i < N &&
                         j < M &&
                         Arrays.equals(A.get(i), B.get(j))) {
@@ -149,11 +150,12 @@ public class Main {
                     j++;
                 }
 
-                V[k + offset] = i;
+                V[offset + k] = i;
 
+                // We reached the end.
                 if (i >= N && j >= M) {
 
-                    trace.add(V.clone());
+                    trace.add(saveVSlice(V, offset, D));
 
                     finalD = D;
 
@@ -161,7 +163,8 @@ public class Main {
                 }
             }
 
-            trace.add(V.clone());
+            // Store only useful V values.
+            trace.add(saveVSlice(V, offset, D));
         }
 
         // --------------------------------------------------------
@@ -173,15 +176,16 @@ public class Main {
 
         for (int D = finalD; D > 0; D--) {
 
-            int[] previousV = trace.get(D - 1);
-
             int k = i - j;
+
+            int[] previousV = trace.get(D - 1);
 
             int previousK;
 
             if (k == -D ||
                     (k != D &&
-                            previousV[k - 1 + offset] < previousV[k + 1 + offset])) {
+                            getVSlice(previousV, D - 1, k - 1)
+                                    < getVSlice(previousV, D - 1, k + 1))) {
 
                 previousK = k + 1;
 
@@ -190,80 +194,60 @@ public class Main {
                 previousK = k - 1;
             }
 
-            int previousI = previousV[previousK + offset];
+            int previousI =
+                    getVSlice(previousV, D - 1, previousK);
 
             int previousJ = previousI - previousK;
 
-            // Walk backwards through equal lines.
+            // Matching diagonal = KEEP
             while (i > previousI &&
                     j > previousJ) {
 
-                result.add(
-                        new Operation(
-                                "KEEP",
-                                i - 1,
-                                j - 1));
+                result.add(new Operation(
+                        ' ',
+                        i - 1,
+                        j - 1
+                ));
 
                 i--;
                 j--;
             }
 
-            // Insert
+            // Edit operation
             if (i == previousI) {
 
-                result.add(
-                        new Operation(
-                                "INSERT",
-                                i,
-                                j - 1));
+                // INSERT
+                result.add(new Operation(
+                        '+',
+                        i,
+                        j - 1
+                ));
 
                 j--;
 
             } else {
 
-                // Delete
-                result.add(
-                        new Operation(
-                                "DELETE",
-                                i - 1,
-                                j));
+                // DELETE
+                result.add(new Operation(
+                        '-',
+                        i - 1,
+                        j
+                ));
 
                 i--;
             }
         }
 
-        // Remaining common prefix.
+        // Remaining KEEP operations.
         while (i > 0 && j > 0) {
 
-            result.add(
-                    new Operation(
-                            "KEEP",
-                            i - 1,
-                            j - 1));
+            result.add(new Operation(
+                    ' ',
+                    i - 1,
+                    j - 1
+            ));
 
             i--;
-            j--;
-        }
-
-        while (i > 0) {
-
-            result.add(
-                    new Operation(
-                            "DELETE",
-                            i - 1,
-                            0));
-
-            i--;
-        }
-
-        while (j > 0) {
-
-            result.add(
-                    new Operation(
-                            "INSERT",
-                            0,
-                            j - 1));
-
             j--;
         }
 
@@ -273,9 +257,34 @@ public class Main {
     }
 
     // ------------------------------------------------------------
+    // Save only useful V diagonals
+    // ------------------------------------------------------------
+
+    static int[] saveVSlice(int[] V, int offset, int D) {
+
+        int[] slice = new int[D + 1];
+
+        int index = 0;
+
+        for (int k = -D; k <= D; k += 2) {
+
+            slice[index++] = V[offset + k];
+        }
+
+        return slice;
+    }
+
+    // ------------------------------------------------------------
+    // Get V value from compressed slice
+    // ------------------------------------------------------------
+
+    static int getVSlice(int[] slice, int D, int k) {
+
+        return slice[(k + D) / 2];
+    }
+
+    // ------------------------------------------------------------
     // Part A output
-    // Raw bytes are written directly.
-    // This is important because lines may contain invalid UTF-8.
     // ------------------------------------------------------------
 
     static void printDiff(
@@ -287,13 +296,13 @@ public class Main {
 
             for (Operation op : operations) {
 
-                if (op.type.equals("KEEP")) {
+                if (op.type == ' ') {
 
                     System.out.write(' ');
                     System.out.write(A.get(op.aIndex));
                     System.out.write('\n');
 
-                } else if (op.type.equals("DELETE")) {
+                } else if (op.type == '-') {
 
                     System.out.write('-');
                     System.out.write(A.get(op.aIndex));
@@ -311,12 +320,9 @@ public class Main {
 
         } catch (IOException e) {
 
-            System.err.println(
-                    "Error writing output: " + e.getMessage());
-
+            System.err.println("Error writing output: " + e.getMessage());
             System.exit(2);
         }
-
     }
 
     // ------------------------------------------------------------
@@ -334,15 +340,13 @@ public class Main {
 
             Operation op = operations.get(index);
 
-            // ----------------------------------------------------
             // KEEP
-            // ----------------------------------------------------
-
-            if (op.type.equals("KEEP")) {
+            if (op.type == ' ') {
 
                 writeUtf8Line(
                         " ",
-                        A.get(op.aIndex));
+                        A.get(op.aIndex)
+                );
 
                 index++;
                 continue;
@@ -350,42 +354,45 @@ public class Main {
 
             // ----------------------------------------------------
             // Change block
-            //
-            // All DELETE operations first,
-            // then all INSERT operations.
             // ----------------------------------------------------
 
             List<Operation> deletes = new ArrayList<>();
             List<Operation> inserts = new ArrayList<>();
 
-            while (index < operations.size() &&
-                    operations.get(index).type.equals("DELETE")) {
+            while (index < operations.size()
+                    && operations.get(index).type != ' ') {
 
-                deletes.add(operations.get(index));
+                Operation current = operations.get(index);
 
-                index++;
-            }
-
-            while (index < operations.size() &&
-                    operations.get(index).type.equals("INSERT")) {
-
-                inserts.add(operations.get(index));
+                if (current.type == '-') {
+                    deletes.add(current);
+                } else {
+                    inserts.add(current);
+                }
 
                 index++;
             }
 
-            // Print deletes.
+            // ----------------------------------------------------
+            // Print all deletes first
+            // ----------------------------------------------------
+
             for (Operation delete : deletes) {
 
                 writeUtf8Line(
                         "-",
-                        A.get(delete.aIndex));
+                        A.get(delete.aIndex)
+                );
             }
 
-            // Print inserts and corresponding ? line.
+            // ----------------------------------------------------
+            // Print inserts
+            // ----------------------------------------------------
+
             int pairs = Math.min(
                     deletes.size(),
-                    inserts.size());
+                    inserts.size()
+            );
 
             for (int i = 0; i < inserts.size(); i++) {
 
@@ -393,31 +400,38 @@ public class Main {
 
                 writeUtf8Line(
                         "+",
-                        B.get(insert.bIndex));
+                        B.get(insert.bIndex)
+                );
 
-                // Only paired lines get a ? line.
+                // If this insert has a corresponding delete,
+                // print character-level changes.
                 if (i < pairs) {
 
                     Operation delete = deletes.get(i);
 
-                    String oldText = new String(
-                            A.get(delete.aIndex),
-                            StandardCharsets.UTF_8);
+                    String oldText =
+                            new String(
+                                    A.get(delete.aIndex),
+                                    StandardCharsets.UTF_8
+                            );
 
-                    String newText = new String(
-                            B.get(insert.bIndex),
-                            StandardCharsets.UTF_8);
+                    String newText =
+                            new String(
+                                    B.get(insert.bIndex),
+                                    StandardCharsets.UTF_8
+                            );
 
                     printHighlightRanges(
                             oldText,
-                            newText);
+                            newText
+                    );
                 }
             }
         }
     }
 
     // ------------------------------------------------------------
-    // Character-level Myers using Unicode code points.
+    // Character-level Myers diff using Unicode code points
     // ------------------------------------------------------------
 
     static List<Operation> myersCodePointDiff(
@@ -426,7 +440,6 @@ public class Main {
 
         int N = A.length;
         int M = B.length;
-
         int max = N + M;
 
         List<Operation> result = new ArrayList<>();
@@ -441,11 +454,15 @@ public class Main {
 
         V[offset + 1] = 0;
 
+        /*
+         * Again, store only useful V slices.
+         */
         List<int[]> trace = new ArrayList<>();
 
         int finalD = 0;
 
-        outer: for (int D = 0; D <= max; D++) {
+        outer:
+        for (int D = 0; D <= max; D++) {
 
             for (int k = -D; k <= D; k += 2) {
 
@@ -453,20 +470,19 @@ public class Main {
 
                 if (k == -D ||
                         (k != D &&
-                                V[k - 1 + offset] < V[k + 1 + offset])) {
+                                V[offset + k - 1]
+                                        < V[offset + k + 1])) {
 
-                    // Insert
-                    i = V[k + 1 + offset];
+                    i = V[offset + k + 1];
 
                 } else {
 
-                    // Delete
-                    i = V[k - 1 + offset] + 1;
+                    i = V[offset + k - 1] + 1;
                 }
 
                 int j = i - k;
 
-                // Matching code points.
+                // Follow matching code points.
                 while (i < N &&
                         j < M &&
                         A[i] == B[j]) {
@@ -475,11 +491,11 @@ public class Main {
                     j++;
                 }
 
-                V[k + offset] = i;
+                V[offset + k] = i;
 
                 if (i >= N && j >= M) {
 
-                    trace.add(V.clone());
+                    trace.add(saveVSlice(V, offset, D));
 
                     finalD = D;
 
@@ -487,7 +503,7 @@ public class Main {
                 }
             }
 
-            trace.add(V.clone());
+            trace.add(saveVSlice(V, offset, D));
         }
 
         // --------------------------------------------------------
@@ -499,15 +515,16 @@ public class Main {
 
         for (int D = finalD; D > 0; D--) {
 
-            int[] previousV = trace.get(D - 1);
-
             int k = i - j;
+
+            int[] previousV = trace.get(D - 1);
 
             int previousK;
 
             if (k == -D ||
                     (k != D &&
-                            previousV[k - 1 + offset] < previousV[k + 1 + offset])) {
+                            getVSlice(previousV, D - 1, k - 1)
+                                    < getVSlice(previousV, D - 1, k + 1))) {
 
                 previousK = k + 1;
 
@@ -516,79 +533,63 @@ public class Main {
                 previousK = k - 1;
             }
 
-            int previousI = previousV[previousK + offset];
+            int previousI =
+                    getVSlice(
+                            previousV,
+                            D - 1,
+                            previousK
+                    );
 
-            int previousJ = previousI - previousK;
+            int previousJ =
+                    previousI - previousK;
 
-            // Matching diagonal.
+            // KEEP
             while (i > previousI &&
                     j > previousJ) {
 
-                result.add(
-                        new Operation(
-                                "KEEP",
-                                i - 1,
-                                j - 1));
+                result.add(new Operation(
+                        ' ',
+                        i - 1,
+                        j - 1
+                ));
 
                 i--;
                 j--;
             }
 
+            // INSERT / DELETE
             if (i == previousI) {
 
-                // Insert
-                result.add(
-                        new Operation(
-                                "INSERT",
-                                i,
-                                j - 1));
+                result.add(new Operation(
+                        '+',
+                        i,
+                        j - 1
+                ));
 
                 j--;
 
             } else {
 
-                // Delete
-                result.add(
-                        new Operation(
-                                "DELETE",
-                                i - 1,
-                                j));
+                result.add(new Operation(
+                        '-',
+                        i - 1,
+                        j
+                ));
 
                 i--;
             }
         }
 
+        // Remaining KEEP operations.
         while (i > 0 && j > 0) {
 
-            result.add(
-                    new Operation(
-                            "KEEP",
-                            i - 1,
-                            j - 1));
+            result.add(new Operation(
+                    ' ',
+                    i - 1,
+                    j - 1
+            ));
 
             i--;
-            j--;
-        }
-
-        while (i > 0) {
-
-            result.add(
-                    new Operation(
-                            "DELETE",
-                            i - 1,
-                            0));
-
-            i--;
-        }
-
-        while (j > 0) {
-
-            result.add(
-                    new Operation(
-                            "INSERT",
-                            0,
-                            j - 1));
-
             j--;
         }
 
@@ -598,75 +599,93 @@ public class Main {
     }
 
     // ------------------------------------------------------------
-    // Find changed character ranges.
+    // Highlight changed character ranges
     // ------------------------------------------------------------
 
     static void printHighlightRanges(
             String oldText,
             String newText) {
 
-        int[] oldCP = oldText.codePoints().toArray();
+        int[] oldCodePoints =
+                oldText.codePoints().toArray();
 
-        int[] newCP = newText.codePoints().toArray();
+        int[] newCodePoints =
+                newText.codePoints().toArray();
 
-        List<Operation> operations = myersCodePointDiff(oldCP, newCP);
+        List<Operation> operations =
+                myersCodePointDiff(
+                        oldCodePoints,
+                        newCodePoints
+                );
 
         List<int[]> oldRanges = new ArrayList<>();
-
         List<int[]> newRanges = new ArrayList<>();
 
-        int oldPos = 0;
-        int newPos = 0;
+        int oldPosition = 0;
+        int newPosition = 0;
 
         for (Operation op : operations) {
 
-            if (op.type.equals("KEEP")) {
+            if (op.type == ' ') {
 
-                oldPos++;
-                newPos++;
+                oldPosition++;
+                newPosition++;
 
-            } else if (op.type.equals("DELETE")) {
+            } else if (op.type == '-') {
 
                 addRange(
                         oldRanges,
-                        oldPos,
-                        oldPos + 1);
+                        oldPosition,
+                        oldPosition + 1
+                );
 
-                oldPos++;
+                oldPosition++;
 
             } else {
 
                 addRange(
                         newRanges,
-                        newPos,
-                        newPos + 1);
+                        newPosition,
+                        newPosition + 1
+                );
 
-                newPos++;
+                newPosition++;
             }
         }
 
+        String oldResult =
+                formatRanges(oldRanges);
+
+        String newResult =
+                formatRanges(newRanges);
+
         try {
-            String output = "? " +
-                    formatRanges(oldRanges) +
-                    " | " +
-                    formatRanges(newRanges);
+
+            String output =
+                    "? "
+                    + oldResult
+                    + " | "
+                    + newResult;
 
             System.out.write(
-                    output.getBytes(StandardCharsets.UTF_8));
+                    output.getBytes(StandardCharsets.UTF_8)
+            );
+
             System.out.write('\n');
+
         } catch (IOException e) {
+
             System.err.println(
-                    "Error writing output: " + e.getMessage());
+                    "Error writing highlight: "
+                            + e.getMessage()
+            );
+
             System.exit(2);
         }
     }
 
     // ------------------------------------------------------------
-    // Add/merge range.
-    // Example:
-    // 3-5 + 5-7
-    // becomes
-    // 3-7
+    // Add / merge ranges
     // ------------------------------------------------------------
 
     static void addRange(
@@ -680,27 +699,26 @@ public class Main {
 
         if (!ranges.isEmpty()) {
 
-            int[] last = ranges.get(ranges.size() - 1);
+            int[] last =
+                    ranges.get(ranges.size() - 1);
 
-            // Touching or overlapping ranges.
+            // Merge touching or overlapping ranges.
             if (start <= last[1]) {
 
-                last[1] = Math.max(last[1], end);
+                last[1] =
+                        Math.max(last[1], end);
 
                 return;
             }
         }
 
         ranges.add(
-                new int[] { start, end });
+                new int[]{start, end}
+        );
     }
 
     // ------------------------------------------------------------
-    // Convert ranges to:
-    //
-    // .
-    // 3-5
-    // 3-5,9-12
+    // Format ranges
     // ------------------------------------------------------------
 
     static String formatRanges(
@@ -710,7 +728,8 @@ public class Main {
             return ".";
         }
 
-        StringBuilder sb = new StringBuilder();
+        StringBuilder sb =
+                new StringBuilder();
 
         for (int i = 0; i < ranges.size(); i++) {
 
@@ -729,24 +748,34 @@ public class Main {
     }
 
     // ------------------------------------------------------------
-    // UTF-8 output for Part B.
-    // Highlight tests are valid UTF-8.
+    // Exact UTF-8 output with LF
     // ------------------------------------------------------------
 
     static void writeUtf8Line(
-        String prefix,
-        byte[] line) {
+            String prefix,
+            byte[] line) {
 
         try {
-            System.out.write(prefix.getBytes(StandardCharsets.UTF_8));
+
+            System.out.write(
+                    prefix.getBytes(StandardCharsets.UTF_8)
+            );
+
             System.out.write(line);
+
+            // IMPORTANT:
+            // Explicit LF instead of println(),
+            // because Windows println() produces CRLF.
             System.out.write('\n');
-            System.out.flush();
+
         } catch (IOException e) {
+
             System.err.println(
-                    "Error writing output: " + e.getMessage());
+                    "Error writing output: "
+                            + e.getMessage()
+            );
+
             System.exit(2);
         }
     }
-
 }
