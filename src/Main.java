@@ -1,4 +1,4 @@
-```java
+
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -362,7 +362,6 @@ public class Main {
         return s.toString();
     }
 }
-```
 
 
 // import java.io.IOException;
